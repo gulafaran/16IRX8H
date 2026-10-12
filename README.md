@@ -10,12 +10,13 @@ verified on BIOS **KWCN51WW** with kernel 7.2.9 (Gentoo), NVIDIA open driver
 | `acpi/etmd-fix` | SSDT override | `\_TZ.ETMD` AE_NOT_FOUND aborting `IETM._OSC` (DPTF handshake) at every boot |
 | `acpi/wm00-fix` | SSDT override | `WM00` AE_NOT_FOUND on brightness keys |
 | `edid/` | EDID override | Corrupted internal-panel EDID reads: 640x400 boots, black screen after resume |
-| `patches/` | Kernel patch | TAS2781 speaker amps discarding valid factory calibration |
+| `patches/0001-…` | Kernel patch | TAS2781 speaker amps discarding valid factory calibration |
+| `patches/0002-…` | Kernel patch | Speakers silent until reboot after the HDA codec runtime suspends (`power_save`) |
 
 ```
 acpi/       SSDT sources (.dsl) and compiled tables (.aml)
 edid/       EDID of the internal panel (CSOT MNG007DA2-3, 2560x1600@240)
-patches/    kernel patch, laid out for /etc/portage/patches
+patches/    kernel patches, laid out for /etc/portage/patches
 config/     dracut config and the kernel command line parameter
 ```
 
@@ -167,9 +168,48 @@ kernel logs:
 tas2781-hda i2c-TIAS2781:00: tas2781_cali_v1_crc_unwritten: BIOS left V1 calibration CRC unwritten, using data as-is
 ```
 
-On Gentoo, copy it to `/etc/portage/patches/sys-kernel/gentoo-sources/` and
-re-emerge the kernel sources. On other distributions, apply it to the
-kernel tree before building.
+## TAS2781 runtime power-management patch
+
+`patches/sys-kernel/gentoo-sources/0002-tas2781-restore-amps-after-codec-runtime-suspend.patch`
+
+With HDA codec power saving enabled (`snd_hda_intel power_save` > 0), the
+speakers go silent after the first idle period and stay silent until a
+reboot or a system suspend/resume. Headphones are unaffected.
+
+When the ALC287 codec runtime suspends, the TAS2781 amplifiers lose their
+register contents. The driver keeps a cache of the loaded
+book/program/configuration and only writes to the chips when the cache
+differs, so on the next playback it skips everything (`Unneeded loading dsp
+conf 0` in the debug log) and the amps stay unconfigured. System resume
+already invalidates the cache and resets the chips, which is why a
+suspend/resume brings sound back.
+
+The patch moves system resume's restore sequence into
+`tas2781_hda_restore()` and runs it when a stream starts, but only if the
+codec spent time runtime suspended since the amps were last configured
+(tracked with `pm_runtime_suspended_time()` on the codec device). The check
+is in the playback hook rather than the amps' runtime resume because the
+codec can power down (after `power_save` seconds) before the amps
+autosuspend (after 3 s), so a stream can start on amps that are still
+runtime active but have lost their state.
+
+Measured on this machine:
+
+| `power_save` | On stream start after idle | Delay |
+|---|---|---|
+| 1 | `Codec was suspended, restoring amps` (debug) | ~1.3 s (full reload) |
+| 0 | no restore, cached state is valid | ~14 ms |
+
+The 1.3 s is the cost of reprogramming both amplifiers. It only applies when
+codec power saving is enabled and the codec actually powered down.
+
+### Install (both patches)
+
+On Gentoo, copy the patches to `/etc/portage/patches/sys-kernel/gentoo-sources/`
+and re-emerge the kernel sources, then rebuild the kernel. On other
+distributions, apply them to the kernel tree before building. They touch
+different files (`tas2781_hda.c` and `tas2781_hda_i2c.c`) and apply
+independently.
 
 ## Known remaining firmware messages (harmless)
 

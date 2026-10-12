@@ -1,0 +1,113 @@
+--- a/sound/hda/codecs/side-codecs/tas2781_hda_i2c.c
++++ b/sound/hda/codecs/side-codecs/tas2781_hda_i2c.c
+@@ -59,6 +59,8 @@
+ 	int (*save_calibration)(struct tas2781_hda *h);
+ 
+ 	int hda_chip_id;
++	/* Codec runtime-suspended time when the amps were last configured */
++	u64 codec_suspended_time;
+ };
+ 
+ static int tas2781_get_i2c_res(struct acpi_resource *ares, void *data)
+@@ -164,15 +166,65 @@
+ 	return ret;
+ }
+ 
++static u64 tas2781_codec_suspended_time(struct tas2781_hda *tas_hda)
++{
++	struct hda_codec *codec = tas_hda->priv->codec;
++
++	return codec ? pm_runtime_suspended_time(hda_codec_dev(codec)) : 0;
++}
++
++/*
++ * Forget the cached book/program/configuration, reset the amplifiers and
++ * reload the current program, so that the next tuning switch rewrites the
++ * full configuration instead of assuming the chips still hold it.
++ */
++static void tas2781_hda_restore(struct tas2781_hda *tas_hda)
++{
++	struct tas2781_hda_i2c_priv *hda_priv = tas_hda->hda_priv;
++	int i;
++
++	for (i = 0; i < tas_hda->priv->ndev; i++) {
++		tas_hda->priv->tasdevice[i].cur_book = -1;
++		tas_hda->priv->tasdevice[i].cur_prog = -1;
++		tas_hda->priv->tasdevice[i].cur_conf = -1;
++	}
++	tasdevice_reset(tas_hda->priv);
++	tasdevice_prmg_load(tas_hda->priv, tas_hda->priv->cur_prog);
++
++	/* Init common setting for different audio profiles */
++	if (tas_hda->priv->rcabin.init_profile_id >= 0)
++		tasdevice_select_cfg_blk(tas_hda->priv,
++			tas_hda->priv->rcabin.init_profile_id,
++			TASDEVICE_BIN_BLK_PRE_POWER_UP);
++
++	hda_priv->codec_suspended_time = tas2781_codec_suspended_time(tas_hda);
++}
++
+ static void tas2781_hda_playback_hook(struct device *dev, int action)
+ {
+ 	struct tas2781_hda *tas_hda = dev_get_drvdata(dev);
++	struct tas2781_hda_i2c_priv *hda_priv = tas_hda->hda_priv;
+ 
+ 	dev_dbg(tas_hda->dev, "%s: action = %d\n", __func__, action);
+ 	switch (action) {
+ 	case HDA_GEN_PCM_ACT_OPEN:
+ 		pm_runtime_get_sync(dev);
+ 		scoped_guard(mutex, &tas_hda->priv->codec_lock) {
++			/*
++			 * The amplifiers lose their register contents when the
++			 * HDA codec is runtime suspended (power_save), e.g. on
++			 * the Lenovo Legion Pro 7 16IRX8H (SSID 17aa:3884),
++			 * while the cached state still claims the program and
++			 * configuration are loaded, leaving the speakers silent.
++			 * This can happen without the amps themselves being
++			 * runtime suspended, so check the codec here.
++			 */
++			if (tas2781_codec_suspended_time(tas_hda) !=
++			    hda_priv->codec_suspended_time) {
++				dev_dbg(tas_hda->dev,
++					"Codec was suspended, restoring amps\n");
++				tas2781_hda_restore(tas_hda);
++			}
+ 			tasdevice_tuning_switch(tas_hda->priv, 0);
+ 			tas_hda->priv->playback_started = true;
+ 		}
+@@ -527,6 +579,8 @@
+ 		break;
+ 	}
+ 
++	hda_priv->codec_suspended_time = tas2781_codec_suspended_time(tas_hda);
++
+ out:
+ 	release_firmware(fmw);
+ }
+@@ -764,25 +818,12 @@
+ static int tas2781_system_resume(struct device *dev)
+ {
+ 	struct tas2781_hda *tas_hda = dev_get_drvdata(dev);
+-	int i;
+ 
+ 	dev_dbg(tas_hda->priv->dev, "System Resume\n");
+ 
+ 	guard(mutex)(&tas_hda->priv->codec_lock);
+ 
+-	for (i = 0; i < tas_hda->priv->ndev; i++) {
+-		tas_hda->priv->tasdevice[i].cur_book = -1;
+-		tas_hda->priv->tasdevice[i].cur_prog = -1;
+-		tas_hda->priv->tasdevice[i].cur_conf = -1;
+-	}
+-	tasdevice_reset(tas_hda->priv);
+-	tasdevice_prmg_load(tas_hda->priv, tas_hda->priv->cur_prog);
+-
+-	/* Init common setting for different audio profiles */
+-	if (tas_hda->priv->rcabin.init_profile_id >= 0)
+-		tasdevice_select_cfg_blk(tas_hda->priv,
+-			tas_hda->priv->rcabin.init_profile_id,
+-			TASDEVICE_BIN_BLK_PRE_POWER_UP);
++	tas2781_hda_restore(tas_hda);
+ 
+ 	if (tas_hda->priv->playback_started)
+ 		tasdevice_tuning_switch(tas_hda->priv, 0);
