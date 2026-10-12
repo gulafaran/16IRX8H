@@ -1,0 +1,1 @@
+drm.edid_firmware=eDP-1:edid/legion-edp.bin
