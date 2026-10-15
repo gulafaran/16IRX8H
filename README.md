@@ -10,7 +10,7 @@ verified on BIOS **KWCN51WW** with kernel 7.2.9 (Gentoo), NVIDIA open driver
 | `acpi/etmd-fix` | SSDT override | `\_TZ.ETMD` AE_NOT_FOUND aborting `IETM._OSC` (DPTF handshake) at every boot |
 | `acpi/wm00-fix` | SSDT override | `WM00` AE_NOT_FOUND on brightness keys |
 | `edid/` | EDID override | Corrupted internal-panel EDID reads: 640x400 boots, black screen after resume |
-| `patches/0001-…` | Kernel patch | TAS2781 speaker amps discarding valid factory calibration |
+| — | Fixed upstream (7.2.11) | TAS2781 speaker amps discarding valid factory calibration |
 | `patches/0002-…` | Kernel patch | Speakers silent until reboot after the HDA codec runtime suspends (`power_save`) |
 
 ```
@@ -146,26 +146,24 @@ The line appears on every probe of the panel, including on resume.
 Only use this EDID with this exact panel; remove the parameter if the panel
 is replaced.
 
-## TAS2781 calibration patch
-
-`patches/sys-kernel/gentoo-sources/0001-tas2781-accept-unwritten-v1-cali-crc.patch`
+## TAS2781 calibration (fixed upstream in 7.2.11)
 
 The speakers use TI TAS2781 smart amplifiers (codec SSID 17aa:3884). Their
 per-unit factory calibration is stored in a UEFI variable in the V1 layout.
 This BIOS writes the calibration records but leaves the trailing timestamp
-and CRC words zero, so the kernel logs `V1 CRC error`, discards the valid
-calibration, and runs the speaker-protection algorithm on generic defaults.
+and CRC words zero. Before 7.2.11 the kernel logged `V1 CRC error`, discarded
+the valid calibration, and ran the speaker-protection algorithm on generic
+defaults.
 
-The patch accepts the data only when the CRC was **never written**, never
-when it's wrong:
-- both the timestamp and CRC words must be zero, and
-- every device record that will be used must contain non-zero data.
-
-An erased or never-calibrated block is still rejected. When it applies, the
-kernel logs:
+Kernel 7.2.11 accepts V1 data when the timestamp and CRC are both zero and
+the first record is non-zero (added for the 16IRX9H, but not limited by
+SSID), so this machine no longer needs a patch. This repo used to carry one
+(`0001-tas2781-accept-unwritten-v1-cali-crc.patch`, see git history); it
+conflicts with 7.2.11 and must be removed from `/etc/portage/patches`. When the
+upstream fix applies, the kernel logs:
 
 ```
-tas2781-hda i2c-TIAS2781:00: tas2781_cali_v1_crc_unwritten: BIOS left V1 calibration CRC unwritten, using data as-is
+tas2781-hda i2c-TIAS2781:00: tas2781_apply_calib: V1 data without CRC, accepting
 ```
 
 ## TAS2781 runtime power-management patch
@@ -203,13 +201,11 @@ Measured on this machine:
 The 1.3 s is the cost of reprogramming both amplifiers. It only applies when
 codec power saving is enabled and the codec actually powered down.
 
-### Install (both patches)
+### Install
 
-On Gentoo, copy the patches to `/etc/portage/patches/sys-kernel/gentoo-sources/`
+On Gentoo, copy the patch to `/etc/portage/patches/sys-kernel/gentoo-sources/`
 and re-emerge the kernel sources, then rebuild the kernel. On other
-distributions, apply them to the kernel tree before building. They touch
-different files (`tas2781_hda.c` and `tas2781_hda_i2c.c`) and apply
-independently.
+distributions, apply it to the kernel tree before building.
 
 ## Known remaining firmware messages (harmless)
 
